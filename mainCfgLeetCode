@@ -1,4 +1,4 @@
---[[ LEETCODE CHEAT | by Yonki | v4.3.1 (Config Crash Fix + Kill Detection + Keyboard-Only Binds) ]]--
+--[[ LEETCODE CHEAT | by Yonki | v4.3.1 (Final Fixes) ]]--
 local RunService = game:GetService("RunService")
 local UIS = game:GetService("UserInputService")
 local Players = game:GetService("Players")
@@ -210,13 +210,14 @@ local function deserialize(tbl)
     if tbl.__type == "Color3" then return Color3.new(tbl.R, tbl.G, tbl.B)
     elseif tbl.__type == "EnumItem" then
         local eType = tbl.EnumType or "KeyCode"
-        local success, enumVal = pcall(function()
-            if Enum[eType] and Enum[eType][tbl.Name] then
-                return Enum[eType][tbl.Name]
-            end
-            return nil
-        end)
-        return success and enumVal or nil
+        local eName = tbl.Name
+        if type(eName) == "string" then
+            local success, enumVal = pcall(function()
+                return Enum[eType][eName]
+            end)
+            if success and enumVal then return enumVal end
+        end
+        return nil
     end
     local result = {}
     for k, v in pairs(tbl) do result[k] = deserialize(v) end
@@ -263,13 +264,10 @@ local function sanitizeConfig()
         end
     end
     
-    -- Бинды: разрешаем ТОЛЬКО клавиатуру (Enum.KeyCode)
     if type(Config.Binds) ~= "table" then Config.Binds = deepCopy(DefaultConfig.Binds) end
-
     local function isKbBind(x)
         return typeof(x) == "EnumItem" and x.EnumType == Enum.KeyCode
     end
-
     for k, v in pairs(DefaultConfig.Binds) do
         if not isKbBind(Config.Binds[k]) then
             Config.Binds[k] = v
@@ -368,7 +366,7 @@ local function playKillSound()
     Debris:AddItem(s, 5) 
 end
 
--- УБИЙСТВО ВРАГОВ (улучшенный детект: тело + голова через лучи последних выстрелов)
+-- УБИЙСТВО ВРАГОВ
 local function setupKillSound(plr)
     local function onChar(char)
         local hum = char:WaitForChild("Humanoid", 10) if not hum then return end
@@ -379,7 +377,6 @@ local function setupKillSound(plr)
 
             local isMe, isHeadshot = false, false
 
-            -- 1) теги создателя
             local tags = {"creator","Creator","Killer","killer","LastAttacker"}
             for _, tagName in ipairs(tags) do
                 local tag = char:FindFirstChild(tagName) or hum:FindFirstChild(tagName)
@@ -390,48 +387,34 @@ local function setupKillSound(plr)
                 end
             end
 
-            -- 2) аим — если только что целились сюда
             if lastAimedPlayer == plr and (tick() - lastAimedTime < 5.0) then
                 isMe = true
             end
 
-            -- 3) проверка всех недавних выстрелов
             local tHead = char:FindFirstChild("Head")
-            for _, shot in ipairs(recentShots) do
-                if tick() - shot.time < 3 then
-                    -- 3a) голова = HEADSHOT
-                    if tHead and not isHeadshot then
-                        local toH = tHead.Position - shot.origin
-                        local pH  = toH:Dot(shot.dir)
-                        if pH > 0 and pH < 1000 then
-                            local closest = shot.origin + shot.dir * pH
-                            if (closest - tHead.Position).Magnitude < 4.5 then
-                                isMe = true; isHeadshot = true
-                            end
-                        end
-                    end
-                    -- 3b) тело — без HEADSHOT
-                    if not isMe then
-                        for _, part in ipairs(char:GetChildren()) do
-                            if part:IsA("BasePart") and part.Name ~= "Head" then
-                                local toP = part.Position - shot.origin
-                                local pLen = toP:Dot(shot.dir)
-                                if pLen > 0 and pLen < 1000 then
-                                    local closest = shot.origin + shot.dir * pLen
-                                    local radius  = math.max(part.Size.Magnitude * 0.5, 2)
-                                    if (closest - part.Position).Magnitude < radius then
-                                        isMe = true
-                                        break
+            local tRoot = char:FindFirstChild("HumanoidRootPart")
+            
+            if not isMe and tRoot then
+                for _, shot in ipairs(recentShots) do
+                    if tick() - shot.time < 2.0 then
+                        local dist = (tRoot.Position - shot.origin).Magnitude
+                        if dist < 1000 then
+                            local dirToTarget = (tRoot.Position - shot.origin).Unit
+                            if dirToTarget:Dot(shot.dir) > 0.92 then -- Щедрый детект (примерно 23 градуса)
+                                isMe = true
+                                if tHead then
+                                    local dirToHead = (tHead.Position - shot.origin).Unit
+                                    if dirToHead:Dot(shot.dir) > 0.97 then
+                                        isHeadshot = true
                                     end
                                 end
+                                break
                             end
                         end
                     end
-                    if isMe and isHeadshot then break end
                 end
             end
 
-            -- 4) подстраховка — прицел (центр) на голове
             if not isMe and tHead then
                 local sp, onscreen = Camera:WorldToViewportPoint(tHead.Position)
                 if onscreen then
@@ -440,12 +423,8 @@ local function setupKillSound(plr)
                 end
             end
 
-            -- 5) слишком далеко = не я
-            local myRoot    = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
-            local theirRoot = char:FindFirstChild("HumanoidRootPart")
-            if myRoot and theirRoot and (myRoot.Position - theirRoot.Position).Magnitude > 1000 then
-                isMe = false
-            end
+            local myRoot = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+            if myRoot and tRoot and (myRoot.Position - tRoot.Position).Magnitude > 1000 then isMe = false end
 
             if isMe then
                 hum:SetAttribute("KilledByMe", true)
@@ -459,7 +438,6 @@ local function setupKillSound(plr)
     plr.CharacterAdded:Connect(onChar)
 end
 
--- СМЕРТЬ ИГРОКА
 local function setupVictimDeath()
     local function onChar(char)
         local hum = char:WaitForChild("Humanoid", 10) if not hum then return end
@@ -470,14 +448,12 @@ local function setupVictimDeath()
             local killerName = "Unknown"
             local creator = char:FindFirstChild("creator") or hum:FindFirstChild("creator") or char:FindFirstChild("Killer") or hum:FindFirstChild("Killer")
             if creator and creator.Value then
-                if typeof(creator.Value) == "Instance" then
-                    killerName = creator.Value.Name
+                if typeof(creator.Value) == "Instance" then killerName = creator.Value.Name
                 else
                     local p = Players:GetPlayerByUserId(tonumber(creator.Value)) or Players:FindFirstChild(tostring(creator.Value))
                     if p then killerName = p.Name else killerName = tostring(creator.Value) end
                 end
             end
-            
             if killerName ~= "Unknown" then
                 hum:SetAttribute("VictimNotified", true)
                 addKillNotification(string.format(t("kill_msg_victim"), killerName))
@@ -500,23 +476,25 @@ local Accent = Color3.fromRGB(200,0,0) local OffColor = Color3.fromRGB(60,60,60)
 local selectedConfig = "" selectedRow = nil selectedTargetName = nil 
 local currentTab = "aim" currentAimSubTab = "legit" currentEspSubTab = "main" wasThirdPerson = false
 local lastTarget = nil lastTargetTime = 0 bhopSpeed = 16 lastJumpTime = 0 lastBhopWarn = 0 lastTriggerTime = 0
+local currentAimPart = "Head"
 local friendCache = {} lastFriendCacheUpdate = 0
 
--- Слушатель ручных выстрелов (для детекта убийств в тело)
-table.insert(connections, UIS.InputBegan:Connect(function(input, gp)
-    if gp or not scriptEnabled then return end
-    if input.UserInputType == Enum.UserInputType.MouseButton1 then
-        local m = UIS:GetMouseLocation()
-        local ray = Camera:ScreenPointToRay(m.X, m.Y)
+-- Улучшенный детект кликов (работает даже если InputBegan заблокирован)
+local wasMouseDown = false
+table.insert(connections, RunService.RenderStepped:Connect(function()
+    if not scriptEnabled then return end
+    local isMouseDown = UIS:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
+    if isMouseDown and not wasMouseDown then
         table.insert(recentShots, {
-            time   = tick(),
-            origin = ray.Origin,
-            dir    = ray.Direction
+            time = tick(),
+            origin = Camera.CFrame.Position,
+            dir = Camera.CFrame.LookVector
         })
         for i = #recentShots, 1, -1 do
             if tick() - recentShots[i].time > 3 then table.remove(recentShots, i) end
         end
     end
+    wasMouseDown = isMouseDown
 end))
 
 local hudPos = UDim2.new(0.5, -100, 1, -80)
@@ -576,17 +554,12 @@ local function hasLOS(targetPos, targetChar)
     params.FilterType = Enum.RaycastFilterType.Exclude 
     params.IgnoreWater = true 
     params.RespectCanCollide = false 
-    
     local ign = {} 
     if LP.Character then table.insert(ign, LP.Character) end 
     if targetChar then table.insert(ign, targetChar) end 
     params.FilterDescendantsInstances = ign
-    
     local origin = Camera.CFrame.Position 
-    if LP.Character and LP.Character:FindFirstChild("Head") then 
-        origin = LP.Character.Head.Position 
-    end
-    
+    if LP.Character and LP.Character:FindFirstChild("Head") then origin = LP.Character.Head.Position end
     local ray = workspace:Raycast(origin, targetPos - origin, params)
     return ray == nil
 end
@@ -638,7 +611,7 @@ end
 
 local function createWatermark()
     if wmGui then wmGui:Destroy() end
-    wmGui = Instance.new("ScreenGui") wmGui.Name = "LEETCODE_Watermark" wmGui.ResetOnSpawn = false wmGui.IgnoreGuiInset = true wmGui.DisplayOrder = 999 safeParent(wmGui)
+    wmGui = Instance.new("ScreenGui") wmGui.Name = "LEETCODE_Watermark" wmGui.ResetOnSpawn = false wmGui.IgnoreGuiInset = true wmGui.DisplayOrder = 100 safeParent(wmGui)
     
     local wmFrame = Instance.new("Frame") wmFrame.Size = UDim2.new(0, 220, 0, 50) wmFrame.Position = UDim2.new(1, -240, 0, 20) wmFrame.BackgroundColor3 = Color3.fromRGB(12, 12, 12) wmFrame.BackgroundTransparency = 0.1 wmFrame.Parent = wmGui Instance.new("UICorner", wmFrame).CornerRadius = UDim.new(0, 8)
     local wmGradientBg = Instance.new("UIGradient")
@@ -737,7 +710,7 @@ table.insert(connections,RunService.RenderStepped:Connect(function(dt)
         end
     end
 
-    -- ТРИГГЕР
+    -- ТРИГГЕР (Исправлено на 18 пикселей)
     if Config.Trigger.Enabled then
         local center = Camera.ViewportSize / 2
         local targetFound = false
@@ -753,7 +726,7 @@ table.insert(connections,RunService.RenderStepped:Connect(function(dt)
                         if not skip then
                             local sp, onscreen = Camera:WorldToViewportPoint(p.Character.Head.Position)
                             local realDist = (p.Character.Head.Position - Camera.CFrame.Position).Magnitude
-                            if onscreen and (Vector2.new(sp.X, sp.Y) - center).Magnitude <= 27 and realDist <= Config.Trigger.MaxDist then
+                            if onscreen and (Vector2.new(sp.X, sp.Y) - center).Magnitude <= 18 and realDist <= Config.Trigger.MaxDist then
                                 targetFound = true
                                 lastShotPlayer = p
                                 lastShotTime = tick()
@@ -778,7 +751,22 @@ table.insert(connections,RunService.RenderStepped:Connect(function(dt)
     -- АИМ
     if not Config.Aim.Enabled then lastTarget = nil return end
     local bindDown = isBindPressed(Config.Aim.Bind)
-    if bindDown then local cl = getClosest(Camera.CFrame, Config.Aim.StickyAim and lastTarget or nil) if cl then lastTarget = cl lastTargetTime = tick() end end
+    
+    if bindDown then 
+        local cl = getClosest(Camera.CFrame, Config.Aim.StickyAim and lastTarget or nil) 
+        if cl then 
+            if cl ~= lastTarget then
+                if Config.Aim.TargetPart == "Random" then
+                    currentAimPart = (math.random(1, 2) == 1) and "Head" or "Body"
+                else
+                    currentAimPart = Config.Aim.TargetPart
+                end
+            end
+            lastTarget = cl 
+            lastTargetTime = tick() 
+        end 
+    end
+    
     local targetToUse = nil if bindDown then targetToUse = lastTarget end
     if targetToUse and targetToUse.Character then
         local hum = targetToUse.Character:FindFirstChildOfClass("Humanoid") local head = targetToUse.Character:FindFirstChild("Head")
@@ -787,9 +775,7 @@ table.insert(connections,RunService.RenderStepped:Connect(function(dt)
             if onscreen and (Vector2.new(sp.X, sp.Y) - center).Magnitude <= Config.Aim.FOVRadius then
                 
                 local part = head
-                if Config.Aim.TargetPart == "Random" then
-                    if math.random(1, 2) == 1 then part = head else part = targetToUse.Character:FindFirstChild("HumanoidRootPart") or head end
-                elseif Config.Aim.TargetPart == "Body" then
+                if currentAimPart == "Body" then
                     part = targetToUse.Character:FindFirstChild("HumanoidRootPart") or head
                 end
 
@@ -943,24 +929,33 @@ table.insert(connections,RunService.RenderStepped:Connect(function()
                     if showHP then
                         d.healthBarBg.Visible = true d.healthBar.Visible = true d.healthText.Visible = false local bx, by, bw, bh = 0,0,0,0 local fill
                         
+                        -- Исправленные позиции ХП-бара (за пределами бокса)
                         if Config.ESP.HpBarPos == "Left" then 
-                            bw = 4 bh = math.max(hh, 2) bx = left.X - 8 by = bot.Y - bh fill = bh * hpPercent 
+                            bw = 4 bh = math.max(hh, 2) 
+                            bx = left.X - 10 
+                            by = bot.Y - bh 
+                            fill = bh * hpPercent 
                             d.healthBar.Size = Vector2.new(bw, fill)
                             d.healthBar.Position = Vector2.new(bx, bot.Y - fill)
                         elseif Config.ESP.HpBarPos == "Right" then 
-                            bw = 4 bh = math.max(hh, 2) bx = right.X + 4 by = bot.Y - bh fill = bh * hpPercent 
+                            bw = 4 bh = math.max(hh, 2) 
+                            bx = right.X + 6 
+                            by = bot.Y - bh 
+                            fill = bh * hpPercent 
                             d.healthBar.Size = Vector2.new(bw, fill)
                             d.healthBar.Position = Vector2.new(bx, bot.Y - fill)
                         elseif Config.ESP.HpBarPos == "Top" then 
                             bw = math.max(w, 4) bh = 4 
                             bx = (left.X + right.X) / 2 - (bw / 2)
-                            by = top.Y - 8 fill = bw * hpPercent 
+                            by = top.Y - 12 
+                            fill = bw * hpPercent 
                             d.healthBar.Size = Vector2.new(fill, bh)
                             d.healthBar.Position = Vector2.new(bx, by)
                         elseif Config.ESP.HpBarPos == "Bottom" then 
                             bw = math.max(w, 4) bh = 4 
                             bx = (left.X + right.X) / 2 - (bw / 2)
-                            by = bot.Y + 4 fill = bw * hpPercent 
+                            by = bot.Y + 8 
+                            fill = bw * hpPercent 
                             d.healthBar.Size = Vector2.new(fill, bh)
                             d.healthBar.Position = Vector2.new(bx, by)
                         end
@@ -1004,8 +999,9 @@ BuildUI = function(animate)
     for _,cn in ipairs(uiConnections) do pcall(function() cn:Disconnect() end) end uiConnections = {} bindButtons = {} colorRefs = {} listeningFor = nil 
     TextCol = getContrastColor(Accent) local isLightTheme = (TextCol.R == 0)
     
-    screenGui=Instance.new("ScreenGui") screenGui.Name="LEETCODE_CHEAT" screenGui.ResetOnSpawn=false screenGui.DisplayOrder=2147483647 safeParent(screenGui)
-    hudGui=Instance.new("ScreenGui") hudGui.Name="LEETCODE_HUD" hudGui.ResetOnSpawn=false hudGui.IgnoreGuiInset = true hudGui.DisplayOrder = 2147483647 safeParent(hudGui)
+    -- Установлен 100 для главного меню
+    screenGui=Instance.new("ScreenGui") screenGui.Name="LEETCODE_CHEAT" screenGui.ResetOnSpawn=false screenGui.DisplayOrder=100 safeParent(screenGui)
+    hudGui=Instance.new("ScreenGui") hudGui.Name="LEETCODE_HUD" hudGui.ResetOnSpawn=false hudGui.IgnoreGuiInset = true hudGui.DisplayOrder=100 safeParent(hudGui)
     createWatermark()
     
     local initX, initY = 820, 550
@@ -1139,7 +1135,8 @@ BuildUI = function(animate)
     if currentTab == "aim" or currentTab == "esp" then contentArea.Position = UDim2.new(0, 10, 0, 58) contentArea.Size = UDim2.new(1, -20, 1, -174) subTabsFrame.Visible = true
     else contentArea.Position = UDim2.new(0, 10, 0, 58) contentArea.Size = UDim2.new(1, -20, 1, -122) subTabsFrame.Visible = false end
 
-    avatarPopupGui = Instance.new("ScreenGui") avatarPopupGui.Name = "LEETCODE_AvatarPopup" avatarPopupGui.ResetOnSpawn = false avatarPopupGui.IgnoreGuiInset = true avatarPopupGui.DisplayOrder = 2147483647 safeParent(avatarPopupGui) avatarPopupGui.Enabled = false
+    -- Установлен 200 для попапов, чтобы они были выше меню
+    avatarPopupGui = Instance.new("ScreenGui") avatarPopupGui.Name = "LEETCODE_AvatarPopup" avatarPopupGui.ResetOnSpawn = false avatarPopupGui.IgnoreGuiInset = true avatarPopupGui.DisplayOrder = 200 safeParent(avatarPopupGui) avatarPopupGui.Enabled = false
     local avPopupBg = Instance.new("TextButton") avPopupBg.Size = UDim2.new(1,0,1,0) avPopupBg.BackgroundColor3 = Color3.new(0,0,0) avPopupBg.BackgroundTransparency = 0.6 avPopupBg.Text = "" avPopupBg.ZIndex = 200 avPopupBg.Parent = avatarPopupGui avPopupBg.MouseButton1Click:Connect(function() avatarPopupGui.Enabled = false end)
     local avPopupFrame = Instance.new("Frame") avPopupFrame.Size = UDim2.new(0, 350, 0, 220) avPopupFrame.Position = UDim2.new(0.5, -175, 0.5, -110) avPopupFrame.BackgroundColor3 = Color3.fromRGB(25,25,25) avPopupFrame.BorderSizePixel = 0 avPopupFrame.Active = true avPopupFrame.ZIndex = 201 avPopupFrame.Parent = avPopupBg Instance.new("UICorner", avPopupFrame).CornerRadius = UDim.new(0,10) Instance.new("UIStroke", avPopupFrame).Color = Accent
     local avTitle = Instance.new("TextLabel") avTitle.Size = UDim2.new(1,0,0,30) avTitle.Position = UDim2.new(0,0,0,10) avTitle.BackgroundTransparency = 1 avTitle.Text = t("avatar_title") avTitle.TextColor3 = Color3.new(1,1,1) avTitle.TextSize = 18 avTitle.Font = Enum.Font.GothamBold avTitle.ZIndex = 202 avTitle.Parent = avPopupFrame
@@ -1151,7 +1148,7 @@ BuildUI = function(animate)
     avApplyBtn.MouseButton1Click:Connect(function() local newUrl = avTextBox.Text if newUrl ~= "" then if tonumber(newUrl) then newUrl = "rbxassetid://" .. newUrl end customAvatarUrl = newUrl avBgSpider.Image = customAvatarUrl if writefile then ensureDir() pcall(function() writefile(AVATAR_FILE, customAvatarUrl) end) end end avatarPopupGui.Enabled = false end)
     avatarContainer.InputBegan:Connect(function(input) if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then avTextBox.Text = customAvatarUrl or "" avatarPopupGui.Enabled = true end end)
 
-    pickerGui=Instance.new("ScreenGui") pickerGui.Name="LEETCODE_Picker" pickerGui.ResetOnSpawn=false pickerGui.IgnoreGuiInset=true pickerGui.DisplayOrder=2147483647 safeParent(pickerGui)
+    pickerGui=Instance.new("ScreenGui") pickerGui.Name="LEETCODE_Picker" pickerGui.ResetOnSpawn=false pickerGui.IgnoreGuiInset=true pickerGui.DisplayOrder=200 safeParent(pickerGui)
     local pickerFrame=Instance.new("Frame") pickerFrame.Size=UDim2.new(0,220,0,195) pickerFrame.Position=UDim2.new(0.5,-110,0.5,-95) pickerFrame.BackgroundColor3=Color3.fromRGB(25,25,25) pickerFrame.BorderSizePixel=0 pickerFrame.Active=true pickerFrame.Visible=false pickerFrame.ZIndex=10 pickerFrame.Parent=pickerGui Instance.new("UICorner",pickerFrame).CornerRadius=UDim.new(0,10) Instance.new("UIStroke",pickerFrame).Color=Accent
     local svBase=Instance.new("Frame") svBase.Size=UDim2.new(1,-20,0,110) svBase.Position=UDim2.new(0,10,0,10) svBase.BorderSizePixel=0 svBase.Active=true svBase.BackgroundColor3=Color3.fromHSV(0,1,1) svBase.ZIndex=11 svBase.Parent=pickerFrame Instance.new("UICorner",svBase).CornerRadius=UDim.new(0,4)
     local whiteOv=Instance.new("Frame") whiteOv.Size=UDim2.new(1,0,1,0) whiteOv.BackgroundColor3=Color3.new(1,1,1) whiteOv.BorderSizePixel=0 whiteOv.ZIndex=12 whiteOv.Parent=svBase local wg=Instance.new("UIGradient",whiteOv) wg.Transparency=NumberSequence.new({NumberSequenceKeypoint.new(0,0),NumberSequenceKeypoint.new(1,1)})
@@ -1174,7 +1171,7 @@ BuildUI = function(animate)
     table.insert(uiConnections,UIS.InputEnded:Connect(function(i) if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then svDrag=false hueDrag=false end end))
     closeBtn.MouseButton1Click:Connect(function() pickerFrame.Visible=false activeRef=nil if Config.Settings.Theme == "Custom" then task.spawn(function() BuildUI(false) end) end end)
 
-    langPopupGui = Instance.new("ScreenGui") langPopupGui.Name="LEETCODE_LangPopup" langPopupGui.ResetOnSpawn=false langPopupGui.IgnoreGuiInset=true langPopupGui.DisplayOrder=2147483647 safeParent(langPopupGui) langPopupGui.Enabled = false
+    langPopupGui = Instance.new("ScreenGui") langPopupGui.Name="LEETCODE_LangPopup" langPopupGui.ResetOnSpawn=false langPopupGui.IgnoreGuiInset=true langPopupGui.DisplayOrder=200 safeParent(langPopupGui) langPopupGui.Enabled = false
     local langBg = Instance.new("TextButton") langBg.Size = UDim2.new(1,0,1,0) langBg.BackgroundColor3 = Color3.new(0,0,0) langBg.BackgroundTransparency = 0.6 langBg.Text = "" langBg.ZIndex = 200 langBg.Parent = langPopupGui langBg.MouseButton1Click:Connect(function() langPopupGui.Enabled = false end)
     local langFrame=Instance.new("Frame") langFrame.Size=UDim2.new(0,320,0,220) langFrame.Position=UDim2.new(0.5,-160,0.5,-110) langFrame.BackgroundColor3=Color3.fromRGB(25,25,25) langFrame.BorderSizePixel=0 langFrame.Active=true langFrame.ZIndex=201 langFrame.Parent=langBg Instance.new("UICorner",langFrame).CornerRadius=UDim.new(0,10) Instance.new("UIStroke",langFrame).Color=Accent
     local lTitle=Instance.new("TextLabel") lTitle.Size=UDim2.new(1,0,0,30) lTitle.Position=UDim2.new(0,0,0,5) lTitle.BackgroundTransparency=1 lTitle.Text=t("language") lTitle.TextColor3=Color3.new(1,1,1) lTitle.TextSize=16 lTitle.Font=Enum.Font.GothamBold lTitle.ZIndex=202 lTitle.Parent=langFrame
@@ -1193,7 +1190,7 @@ BuildUI = function(animate)
     local closeLang=Instance.new("TextButton") closeLang.Size=UDim2.new(1,-20,0,30) closeLang.Position=UDim2.new(0,10,1,-40) closeLang.BackgroundColor3=Color3.fromRGB(40,40,40) closeLang.Text=t("cancel") closeLang.TextColor3=Color3.new(1,1,1) closeLang.TextSize=14 closeLang.Font=Enum.Font.GothamBold closeLang.ZIndex=202 closeLang.Parent=langFrame Instance.new("UICorner",closeLang).CornerRadius=UDim.new(0,6)
     closeLang.MouseButton1Click:Connect(function() langPopupGui.Enabled = false end)
 
-    cfgPopupGui=Instance.new("ScreenGui") cfgPopupGui.Name="LEETCODE_CfgPopup" cfgPopupGui.ResetOnSpawn=false cfgPopupGui.IgnoreGuiInset=true cfgPopupGui.DisplayOrder=2147483647 safeParent(cfgPopupGui)
+    cfgPopupGui=Instance.new("ScreenGui") cfgPopupGui.Name="LEETCODE_CfgPopup" cfgPopupGui.ResetOnSpawn=false cfgPopupGui.IgnoreGuiInset=true cfgPopupGui.DisplayOrder=200 safeParent(cfgPopupGui)
     local cfgPopupFrame=Instance.new("Frame") cfgPopupFrame.Size=UDim2.new(0,300,0,250) cfgPopupFrame.Position=UDim2.new(0.5,-150,0.5,-125) cfgPopupFrame.BackgroundColor3=Color3.fromRGB(25,25,25) cfgPopupFrame.BorderSizePixel=0 cfgPopupFrame.Active=true cfgPopupFrame.Visible=false cfgPopupFrame.ZIndex=10 cfgPopupFrame.Parent=cfgPopupGui Instance.new("UICorner",cfgPopupFrame).CornerRadius=UDim.new(0,10) Instance.new("UIStroke",cfgPopupFrame).Color=Accent
     local cfgTextBox=Instance.new("TextBox") cfgTextBox.Size=UDim2.new(1,-20,1,-70) cfgTextBox.Position=UDim2.new(0,10,0,10) cfgTextBox.BackgroundColor3=Color3.fromRGB(15,15,15) cfgTextBox.TextColor3=Color3.new(1,1,1) cfgTextBox.TextSize=12 cfgTextBox.Font=Enum.Font.Code cfgTextBox.TextWrapped=true cfgTextBox.MultiLine=true cfgTextBox.ClearTextOnFocus=false cfgTextBox.ZIndex=11 cfgTextBox.Parent=cfgPopupFrame Instance.new("UICorner",cfgTextBox).CornerRadius=UDim.new(0,6)
     local cfgActionBtn=Instance.new("TextButton") cfgActionBtn.Size=UDim2.new(1,-20,0,35) cfgActionBtn.Position=UDim2.new(0,10,1,-45) cfgActionBtn.BackgroundColor3=Accent cfgActionBtn.TextColor3=TextCol cfgActionBtn.TextSize=15 cfgActionBtn.Font=Enum.Font.GothamBold cfgActionBtn.ZIndex=11 cfgActionBtn.Parent=cfgPopupFrame Instance.new("UICorner",cfgActionBtn).CornerRadius=UDim.new(0,6)
@@ -1545,7 +1542,7 @@ BuildUI = function(animate)
                 return 
             end
             
-            -- Бинды ТОЛЬКО на клавиатуру
+            -- Биндим только на клавиатуру
             if input.UserInputType == Enum.UserInputType.Keyboard and input.KeyCode ~= Enum.KeyCode.Unknown then
                 listeningFor.set(input.KeyCode)
                 for _,e in pairs(bindButtons) do 
@@ -1555,7 +1552,7 @@ BuildUI = function(animate)
                 return
             end
 
-            -- Мышь игнорируется — отменяем ожидание
+            -- Мышь не разрешена
             if input.UserInputType == Enum.UserInputType.MouseButton1
             or input.UserInputType == Enum.UserInputType.MouseButton2
             or input.UserInputType == Enum.UserInputType.MouseButton3 then
